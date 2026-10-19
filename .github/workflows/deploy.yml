@@ -89,6 +89,9 @@ jobs:
           # A price below the minimum profit then stops the deploy. Never put
           # costs in site-settings.ts — this repository is public.
           DRIVER_COSTS: ${{ secrets.DRIVER_COSTS }}
+          # Any copy of this repo builds a preview: banner, hidden from Google,
+          # forms switched off (lib/site.ts isPreview). The live repo never does.
+          NEXT_PUBLIC_PREVIEW: ${{ github.repository != 'Nihal51/very_new' && '1' || '' }}
         run: npm run build
 
       - name: Audit the export (SEO, headings, JSON-LD, sitemap)
@@ -110,18 +113,13 @@ jobs:
             echo "::warning::No custom domain — deploying to the default github.io URL."
           fi
 
-      # Publishing happens only in the live website's repo. In a copy (like the
-      # pricing preview) the build, checks and audit still run, nothing is published.
-      - if: github.repository == 'Nihal51/very_new'
-        uses: actions/configure-pages@v5
-      - if: github.repository == 'Nihal51/very_new'
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: out
 
   deploy:
     needs: build
-    if: github.repository == 'Nihal51/very_new'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

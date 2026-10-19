@@ -10,6 +10,7 @@
  * be deployed (see README).
  */
 
+import { isPreview } from './site';
 import { settings } from './settings';
 
 export type Collection = 'bookings' | 'drivers';
@@ -109,6 +110,13 @@ export async function submitDoc(
 ): Promise<SubmitResult> {
   if (!isFirebaseConfigured()) {
     return { ok: false, reason: 'config', message: FRIENDLY.config };
+  }
+  if (isPreview) {
+    return {
+      ok: false,
+      reason: 'config',
+      message: 'This is a preview of the new prices, so nothing is sent from here. To book, use thedrivebuddy.in.',
+    };
   }
 
   try {

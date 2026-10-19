@@ -18,6 +18,13 @@ const canonicalOrigin = (
   process.env.NEXT_PUBLIC_SITE_URL || 'https://thedrivebuddy.in'
 ).replace(/\/+$/, '');
 
+/**
+ * A preview build (NEXT_PUBLIC_PREVIEW=1, set by the deploy workflow in any
+ * copy of this repo): a banner on every page, hidden from search engines, and
+ * the forms do not save anything. The live site never sets it.
+ */
+export const isPreview = process.env.NEXT_PUBLIC_PREVIEW === '1';
+
 export const site = {
   name: 'DriveBuddy',
   legalName: 'DriveBuddy Driver Services',

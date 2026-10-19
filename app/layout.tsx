@@ -8,7 +8,7 @@ import { JsonLd } from '@/components/JsonLd';
 import { MobileCTABar } from '@/components/MobileCTABar';
 import { NoticeBar } from '@/components/NoticeBar';
 import { localBusinessSchema, websiteSchema } from '@/lib/schema';
-import { asset, site } from '@/lib/site';
+import { asset, site, isPreview } from '@/lib/site';
 
 /**
  * Fonts are downloaded at build time and served from our own origin, so there is
@@ -61,11 +61,14 @@ export const metadata: Metadata = {
   ],
   category: 'Transportation',
   formatDetection: { telephone: true, address: false, email: true },
-  robots: {
-    index: true,
-    follow: true,
-    googleBot: { index: true, follow: true, 'max-image-preview': 'large' },
-  },
+  // A preview copy (lib/site.ts isPreview) must never compete with the real site on Google.
+  robots: isPreview
+    ? { index: false, follow: false }
+    : {
+        index: true,
+        follow: true,
+        googleBot: { index: true, follow: true, 'max-image-preview': 'large' },
+      },
   alternates: { canonical: '/' },
   // Google Search Console ownership check. Copy the code from Search Console
   // (Add property → HTML tag → the content="..." value) into

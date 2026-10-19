@@ -1,11 +1,14 @@
 # DriveBuddy — outstation pricing update (preview copy)
 
-> **This is a separate copy of the website, not the live site.** Nothing in
-> this repository publishes anything: the GitHub Pages deploy and the Firebase
-> rules / alerts-robot deploys only run in the live repo (`Nihal51/very_new`),
-> and the `CNAME` file is removed so it can never claim thedrivebuddy.in.
-> Pushing here runs the build and all checks, so you get a green tick when
-> everything compiles.
+> **This is a separate copy of the website, not the live site.** It publishes
+> a **preview** to https://nihal51.github.io/drivebuddy-website-pricing/ —
+> with a "Preview" banner on every page, hidden from Google, and booking
+> switched off. It never touches thedrivebuddy.in (`CNAME` is removed) and
+> never deploys Firebase rules or the alerts robot (those run only in the live
+> repo, `Nihal51/very_new`).
+>
+> One-time setup: repo **Settings → Pages → Source: GitHub Actions**. After
+> that every push here updates the preview in about 3 minutes.
 >
 > **What changed** compared with the live site:
 >

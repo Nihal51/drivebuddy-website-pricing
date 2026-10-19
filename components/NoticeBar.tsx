@@ -1,4 +1,5 @@
 import { settings } from '@/lib/settings';
+import { isPreview } from '@/lib/site';
 
 /**
  * The one-line notice across the top of every page — a festival message, a
@@ -10,8 +11,11 @@ import { settings } from '@/lib/settings';
  * cannot announce an invented rating or customer count either.
  */
 export function NoticeBar() {
-  const { show, text } = settings.notice;
-  if (!show || !text.trim()) return null;
+  const { show, text: notice } = settings.notice;
+  const text = isPreview
+    ? 'Preview of the new outstation pricing — not the live website. Booking is switched off here.'
+    : notice;
+  if (!isPreview && (!show || !text.trim())) return null;
 
   return (
     <aside aria-label="Notice" className="bg-accent text-ink">
