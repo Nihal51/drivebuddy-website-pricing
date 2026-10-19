@@ -1,0 +1,358 @@
+rules_version = '2';
+
+// =============================================================================
+//  DriveBuddy — Firestore security rules
+// =============================================================================
+//  The website is a static site with no server of its own, so browsers talk to
+//  Firestore directly. These rules are what keep customers' names, numbers and
+//  addresses private. Publish: Firebase console → Firestore → Rules → paste →
+//  Publish (or `npm run deploy:backend`).
+//
+//  WHO CAN DO WHAT
+//
+//    Anyone (no login)    create a booking or a driver application, in the exact
+//                         shape the website forms produce. Nothing else.
+//    A logged-in customer the above, plus: read and edit their own profile
+//                         (users/{uid}), register their phones for booking
+//                         notifications (users/{uid}/devices), and read the
+//                         bookings they made while logged in. Never anyone else's.
+//    An admin             read everything; move bookings and drivers through
+//                         their statuses; assign drivers; add notes; save the
+//                         price agreed on the call. An admin is
+//                         a Google account with a verified email that has a
+//                         document in admins/{email}. Only the alerts robot
+//                         (apps-script/Code.js, from its ADMIN_EMAILS property)
+//                         or the Firebase console can create one — no email
+//                         address is written in this file.
+//    The alerts robot     everything else (reference numbers, customer records,
+//                         alerts). It calls Firestore as the project owner's
+//                         Google account, which these rules do not apply to, so
+//                         no browser can forge those fields.
+//
+//  Nothing is ever deleted from the browser — a booking is cancelled, not erased,
+//  so the history of every job stays complete.
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ----------------------------------------------------------- helpers -- */
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        // .get() with defaults: phone-login customers have no email at all.
+        && request.auth.token.get('email_verified', false) == true
+        && exists(/databases/$(database)/documents/admins/$(request.auth.token.get('email', '').lower()));
+    }
+
+    function isText(value, minLen, maxLen) {
+      return value is string && value.size() >= minLen && value.size() <= maxLen;
+    }
+
+    function isOptionalText(value, maxLen) {
+      return value is string && value.size() <= maxLen;
+    }
+
+    // Indian mobile: exactly ten digits, starting 6–9. Forms strip +91 / 0 first.
+    function isMobile(value) {
+      return value is string && value.matches('^[6-9][0-9]{9}$');
+    }
+
+    function isServedCity(value) {
+      return value in ['Raipur', 'Bhilai', 'Durg', 'Bilaspur'];
+    }
+
+    // Numbers an admin blocked from /admin (spam, abuse): no new bookings or
+    // driver applications with them, from the website or the app.
+    function isBlocked(phone) {
+      return exists(/databases/$(database)/documents/blocked/$(phone));
+    }
+
+    // Clients cannot backdate a submission, invent a source, or create a lead
+    // that is already marked as handled. 'app' = the DriveBuddy mobile app
+    // (Nihal51/drivebuddy-mobile), which writes exactly the website's shape.
+    function isServerStamped(data) {
+      return data.createdAt == request.time
+        && data.source in ['website', 'app']
+        && data.status == 'new';
+    }
+
+    // Every admin edit records who made it (uid — customers can read their own
+    // booking, so no admin email is stored on it) and when (server time).
+    function isAdminStamped(data) {
+      return data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid;
+    }
+
+    function changedOnly(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    /* ---------------------------------------------------------- bookings -- */
+    //  Created by components/BookingForm.tsx; numbered and alerted by the
+    //  alerts robot (apps-script/Code.js); managed in /admin.
+
+    function bookingStatuses() {
+      return ['new', 'confirmed', 'assigned', 'completed', 'cancelled'];
+    }
+
+    function isDriverRef(d) {
+      return d is map
+        && d.keys().hasOnly(['id', 'name', 'phone'])
+        && d.keys().hasAll(['id', 'name', 'phone'])
+        && isText(d.id, 1, 128)
+        && isText(d.name, 2, 60)
+        && isMobile(d.phone);
+    }
+
+    // The trip on an outstation booking ('round': the driver stays with the
+    // customer and drives back) or a one-way drop (the driver comes home by
+    // bus/train). Written by the booking form from lib/outstation.ts; the
+    // estimate is only what the customer was shown — the team quotes on the
+    // call. destId '' = a place not in our list (km and estimate 0).
+    function isTrip(t, pkg) {
+      return t is map
+        && t.keys().hasOnly(['to', 'destId', 'kind', 'km', 'days', 'returnDays', 'estFrom', 'estTo'])
+        && t.keys().hasAll(['to', 'destId', 'kind', 'km', 'days', 'returnDays', 'estFrom', 'estTo'])
+        && isText(t.to, 2, 60)
+        && t.destId is string && t.destId.matches('^[a-z]{0,30}$')
+        && ((pkg == 'outstation' && t.kind == 'round') || (pkg == 'one-way-drop' && t.kind == 'one-way'))
+        && t.km is int && t.km >= 0 && t.km <= 5000
+        && t.days is int && t.days >= 1 && t.days <= 60
+        && t.returnDays is int && t.returnDays >= 0 && t.returnDays <= 10
+        && (t.kind == 'one-way' || t.returnDays == 0)
+        && t.estFrom is int && t.estFrom >= 0 && t.estFrom <= 1000000
+        && t.estTo is int && t.estTo >= t.estFrom && t.estTo <= 1000000;
+    }
+
+    // The price the team agreed with the customer on the call, from the quote
+    // calculator in /admin. The customer can read it (their booking), so it
+    // holds only what they pay — the driver's cost and the profit go in the
+    // admin-only timeline, never here.
+    function isQuote(q) {
+      return q is map
+        && q.keys().hasOnly(['amount', 'dayRate', 'days', 'returnDays', 'returnDay', 'extraHours', 'extraHourRate', 'ticket', 'at'])
+        && q.keys().hasAll(['amount', 'dayRate', 'days', 'returnDays', 'returnDay', 'extraHours', 'extraHourRate', 'ticket', 'at'])
+        && q.amount is int && q.amount > 0 && q.amount <= 1000000
+        && q.dayRate is int && q.dayRate > 0 && q.dayRate <= 100000
+        && q.days is int && q.days >= 1 && q.days <= 60
+        && q.returnDays is int && q.returnDays >= 0 && q.returnDays <= 10
+        && q.returnDay is int && q.returnDay >= 0 && q.returnDay <= 100000
+        && q.extraHours is int && q.extraHours >= 0 && q.extraHours <= 200
+        && q.extraHourRate is int && q.extraHourRate >= 0 && q.extraHourRate <= 10000
+        && q.ticket is int && q.ticket >= 0 && q.ticket <= 100000
+        && q.amount == q.dayRate * q.days + q.returnDay * q.returnDays + q.extraHourRate * q.extraHours + q.ticket
+        && q.at == request.time;
+    }
+
+    match /bookings/{bookingId} {
+      // Admins see everything; a customer sees only bookings tied to their login.
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.get('customerUid', '') == request.auth.uid);
+
+      allow create: if
+        request.resource.data.keys().hasOnly([
+          'name', 'phone', 'city', 'package', 'pickup',
+          'preferredTime', 'notes', 'createdAt', 'status', 'source',
+          'customerUid', 'trip'
+        ])
+        && request.resource.data.keys().hasAll([
+          'name', 'phone', 'city', 'package', 'pickup',
+          'preferredTime', 'notes', 'createdAt', 'status', 'source'
+        ])
+        && isText(request.resource.data.name, 2, 60)
+        && isMobile(request.resource.data.phone)
+        && isServedCity(request.resource.data.city)
+        && request.resource.data.package in [
+          '1-hour-300',
+          '3-hours-600',
+          'local-full-day',
+          'outstation',
+          'night-driver',
+          'medical-emergency',
+          'monthly-basic',
+          'monthly-premium',
+          'wedding-event',
+          'one-way-drop'
+        ]
+        && isText(request.resource.data.pickup, 6, 300)
+        && isOptionalText(request.resource.data.preferredTime, 40)
+        && isOptionalText(request.resource.data.notes, 500)
+        // Guests leave customerUid out; a logged-in customer can only tag their own uid.
+        && (!('customerUid' in request.resource.data)
+            || (isSignedIn() && request.resource.data.customerUid == request.auth.uid))
+        // Only outstation trips and one-way drops carry a trip; it is optional
+        // (older app versions leave it out).
+        && (!('trip' in request.resource.data)
+            || isTrip(request.resource.data.trip, request.resource.data.package))
+        && !isBlocked(request.resource.data.phone)
+        && isServerStamped(request.resource.data);
+
+      // Admins move a booking through its lifecycle. The customer's own details
+      // and everything the server wrote stay read-only, even to an admin.
+      // Internal notes do NOT live here — the customer can read this document —
+      // they go in the admin-only timeline below.
+      allow update: if isAdmin()
+        && changedOnly(['status', 'assignedDriver', 'cancelReason', 'quote', 'updatedAt', 'updatedBy'])
+        && request.resource.data.status in bookingStatuses()
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['quote'])
+            || request.resource.data.get('quote', null) == null
+            || isQuote(request.resource.data.quote))
+        && (request.resource.data.get('assignedDriver', null) == null
+            || isDriverRef(request.resource.data.assignedDriver))
+        && isOptionalText(request.resource.data.get('cancelReason', ''), 200)
+        && isAdminStamped(request.resource.data);
+
+      allow delete: if false;
+
+      // The timeline: one entry per change or note, append-only, admins only.
+      // Status changes are written in the same batch as the change itself; so
+      // is a quote, whose entry keeps the driver's cost and the profit.
+      match /events/{eventId} {
+        allow read: if isAdmin();
+        allow create: if isAdmin()
+          && request.resource.data.keys().hasOnly(['type', 'from', 'to', 'note', 'by', 'at'])
+          && request.resource.data.keys().hasAll(['type', 'from', 'to', 'note', 'by', 'at'])
+          && request.resource.data.type in ['status', 'driver', 'note', 'quote']
+          && (request.resource.data.from == null || request.resource.data.from in bookingStatuses())
+          && (request.resource.data.to == null || request.resource.data.to in bookingStatuses())
+          && isOptionalText(request.resource.data.note, 500)
+          && request.resource.data.by == request.auth.token.email
+          && request.resource.data.at == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    /* ----------------------------------------------------------- drivers -- */
+    //  Applications from components/DriverForm.tsx; vetted in /admin.
+
+    match /drivers/{driverId} {
+      allow read: if isAdmin();
+
+      allow create: if
+        request.resource.data.keys().hasOnly([
+          'name', 'phone', 'city', 'experienceYears',
+          'licence', 'about', 'createdAt', 'status', 'source'
+        ])
+        && request.resource.data.keys().hasAll([
+          'name', 'phone', 'city', 'experienceYears',
+          'licence', 'about', 'createdAt', 'status', 'source'
+        ])
+        && isText(request.resource.data.name, 2, 60)
+        && isMobile(request.resource.data.phone)
+        && isServedCity(request.resource.data.city)
+        && request.resource.data.experienceYears is int
+        && request.resource.data.experienceYears >= 5
+        && request.resource.data.experienceYears <= 60
+        && request.resource.data.licence in ['commercial', 'lmv', 'both']
+        && isOptionalText(request.resource.data.about, 500)
+        && !isBlocked(request.resource.data.phone)
+        && isServerStamped(request.resource.data);
+
+      // new → verified → active ⇄ inactive, or rejected.
+      allow update: if isAdmin()
+        && changedOnly(['status', 'adminNote', 'updatedAt', 'updatedBy'])
+        && request.resource.data.status in ['new', 'verified', 'active', 'inactive', 'rejected']
+        && isOptionalText(request.resource.data.get('adminNote', ''), 1000)
+        && isAdminStamped(request.resource.data);
+
+      allow delete: if false;
+    }
+
+    /* ------------------------------------------------------------- users -- */
+    //  A customer's own login profile, written from /account.
+
+    match /users/{uid} {
+      function isOwner() {
+        return isSignedIn() && request.auth.uid == uid;
+      }
+      function validProfile(data) {
+        return isText(data.name, 2, 60)
+          && (data.get('phone', '') == '' || isMobile(data.get('phone', '')))
+          && (data.get('email', '') == '' || data.get('email', '') == request.auth.token.get('email', ''));
+      }
+
+      allow read: if isOwner() || isAdmin();
+      allow create: if isOwner()
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'email', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['name', 'createdAt', 'updatedAt'])
+        && validProfile(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isOwner()
+        && changedOnly(['name', 'phone', 'email', 'updatedAt'])
+        && validProfile(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      // "Delete my account" in the app (a Google Play and App Store requirement).
+      // Their bookings stay, as business records (see /privacy).
+      allow delete: if isOwner();
+
+      // One per phone with booking notifications on, written by the mobile app:
+      // the Expo push token and the language to write in. The alerts robot
+      // reads these to send "Driver assigned" and other status updates. The
+      // customer removes their phone on logout; the robot drops dead tokens.
+      match /devices/{deviceId} {
+        function validDevice(data) {
+          return data.keys().hasOnly(['token', 'platform', 'language', 'updatedAt'])
+            && data.keys().hasAll(['token', 'platform', 'language', 'updatedAt'])
+            && data.token is string
+            && data.token.matches('^Expo(nent)?PushToken\\[[A-Za-z0-9_-]{8,200}\\]$')
+            && data.platform in ['android', 'ios']
+            && data.language in ['en', 'hi']
+            && data.updatedAt == request.time;
+        }
+        allow read, delete: if isOwner();
+        allow create, update: if isOwner() && deviceId.size() <= 150 && validDevice(request.resource.data);
+      }
+    }
+
+    /* --------------------------------------------------------- customers -- */
+    //  One record per phone number, kept by the alerts robot: name, booking
+    //  count, first and last booking. Read-only, admins only.
+
+    match /customers/{phone} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    /* ----------------------------------------------------------- blocked -- */
+    //  blocked/{phone}: numbers that may not book or apply (spam, abuse).
+    //  Added and removed by an admin from a booking in /admin. Never readable
+    //  by customers, so a blocked number cannot tell why.
+
+    match /blocked/{phone} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && isMobile(phone)
+        && request.resource.data.keys().hasOnly(['reason', 'by', 'at'])
+        && request.resource.data.keys().hasAll(['reason', 'by', 'at'])
+        && isOptionalText(request.resource.data.reason, 200)
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.at == request.time;
+      allow delete: if isAdmin();
+      allow update: if false;
+    }
+
+    /* ------------------------------------------------------------ admins -- */
+    //  admins/{email}: written by the alerts robot's setup() or by hand in the
+    //  Firebase console. A signed-in user may check only their own entry —
+    //  that is how /admin knows whether to show the dispatch desk.
+
+    match /admins/{email} {
+      allow read: if isSignedIn() && request.auth.token.get('email', '').lower() == email;
+      allow write: if false;
+    }
+
+    /* -------------------------------------------------------- catch-all -- */
+    //  Anything not allowed above is denied — including meta/counters and any
+    //  collection someone invents.
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

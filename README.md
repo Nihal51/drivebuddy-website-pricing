@@ -1,0 +1,528 @@
+# DriveBuddy — outstation pricing update (preview copy)
+
+> **This is a separate copy of the website, not the live site.** Nothing in
+> this repository publishes anything: the GitHub Pages deploy and the Firebase
+> rules / alerts-robot deploys only run in the live repo (`Nihal51/very_new`),
+> and the `CNAME` file is removed so it can never claim thedrivebuddy.in.
+> Pushing here runs the build and all checks, so you get a green tick when
+> everything compiles.
+>
+> **What changed** compared with the live site:
+>
+> - Outstation trips and one-way drops priced **per day**: ₹1,450–1,650 a
+>   driving day, plus ₹1,000–1,200 for each day the driver travels home by bus
+>   or train. The booking form shows the estimate as soon as a destination is
+>   picked (Raipur → Nagpur one-way: ₹2,450–2,850).
+> - `/admin` price calculator: type what the driver costs, it adds your 15%
+>   minimum profit and shows the profit. Costs and profit stay admin-only.
+> - Optional `DRIVER_COSTS` GitHub secret that stops a deploy if a price
+>   would earn less than the minimum profit.
+> - Full details: [docs/outstation-pricing.md](docs/outstation-pricing.md).
+>
+> **To make it live later:** the same change is kept ready for the live repo
+> (`Nihal51/very_new`) — apply it there, keeping its `CNAME` file. Then
+> publish `firestore.rules` and the alerts robot as usual.
+>
+> This copy starts with a single fresh commit: the live repo's old history
+> is left out on purpose (it contains a key that must never be pushed again).
+
+---
+
+# DriveBuddy
+
+Production website for DriveBuddy — driver-on-demand services in Raipur, Bhilai,
+Durg and Bilaspur, Chhattisgarh.
+
+Next.js 16 (App Router) · Tailwind CSS v4 · TypeScript · statically exported to
+plain HTML. No server, no database calls at render time, no runtime Node
+process. The whole site is a folder of files you can host anywhere.
+
+---
+
+## Before you go live — three things
+
+### 1. Deploy the Firestore rules ⚠️ **do this first**
+
+The site writes bookings straight from the browser to Firestore. Until the rules
+in [`firestore.rules`](firestore.rules) are deployed, **anyone can read every
+customer's name, phone number and home address** out of the `bookings`
+collection — the Firebase API key in the page source is all they need. The key is
+a public identifier by design; the rules are the actual security boundary.
+
+```bash
+npx firebase-tools deploy --only firestore:rules
+```
+
+(If the Firebase CLI is already installed globally, `firebase deploy --only firestore:rules`.
+You will be asked to log in the first time. `firebase.json` and `.firebaserc` in
+this repo already point at project `drive-buddy-acc4c`.)
+
+What the rules do:
+
+| Operation | Bookings & driver applications |
+| --- | --- |
+| `create` | Allowed — but only documents matching the exact field shape, types and length limits the two forms produce |
+| `read` | **Denied.** Nobody can list or fetch a lead from the browser |
+| `update` | **Denied.** A submitted lead is immutable from the client |
+| `delete` | **Denied** |
+
+You read your leads in the [Firebase console](https://console.firebase.google.com/project/drive-buddy-acc4c/firestore),
+which bypasses these rules — as does any backend using the Admin SDK.
+
+**To check the rules are actually live**, ask Firestore for a booking the way a
+stranger with the public API key would. Run this from the project folder:
+
+```bash
+node -e "const k=require('fs').readFileSync('.env.production','utf8').match(/API_KEY=(.*)/)[1].trim();fetch(\`https://firestore.googleapis.com/v1/projects/drive-buddy-acc4c/databases/(default)/documents/bookings?pageSize=1&key=\${k}\`).then(r=>r.json()).then(j=>console.log(j.error?'BLOCKED — rules are live ('+j.error.status+')':'*** EXPOSED — deploy firestore.rules now ***'))"
+```
+
+`BLOCKED — rules are live (PERMISSION_DENIED)` is the answer you want. Verified
+on 2 Sep 2026 for both `bookings` and `drivers`.
+
+**Also recommended: turn on App Check.** In the Firebase console →
+_App Check_ → register the web app with reCAPTCHA v3 and enforce it for
+Firestore. The rules validate the *shape* of a write; App Check validates that
+the write came from your real website rather than a script. That is what stops
+someone spamming ten thousand fake bookings into your collection.
+
+### 2. Set the domain
+
+The domain lives in one file: [`CNAME`](CNAME) in the repo root — a single line,
+no `https://`, no trailing slash. It currently reads `thedrivebuddy.in`. GitHub
+Pages reads that same file for its custom-domain setting, and
+[`deploy.yml`](.github/workflows/deploy.yml) reads it to set the canonical
+origin, so changing the domain is a one-line edit followed by `npm run og`.
+
+On a host other than GitHub Pages, set a build environment variable instead:
+
+```
+NEXT_PUBLIC_SITE_URL=https://your-domain.in
+```
+
+Failing both, the fallback literal in [`lib/site.ts`](lib/site.ts) applies.
+Everything derives from this origin: canonical tags, `sitemap.xml`, `robots.txt`,
+Open Graph and Twitter URLs, and the JSON-LD business identity. No trailing
+slash needed — one is stripped if you leave it.
+
+### 3. Set the environment variables on your host
+
+Not needed on GitHub Pages — [`.env.production`](.env.production) is committed
+and the workflow uses it. On another host, copy the six values in from
+[`.env.local`](.env.local) (Vercel → Settings → Environment Variables, Netlify →
+Site configuration → Environment variables, Cloudflare Pages → Settings →
+Variables). Without them the booking form still works — it shows the WhatsApp
+fallback instead of saving — but you lose the lead record.
+
+```
+NEXT_PUBLIC_FIREBASE_API_KEY
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+NEXT_PUBLIC_FIREBASE_PROJECT_ID
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+NEXT_PUBLIC_FIREBASE_APP_ID
+```
+
+These are public identifiers, not secrets. They are in env vars for hygiene and
+so a staging deploy can point at a separate Firebase project.
+
+---
+
+## Changing prices, phone numbers or the notice bar
+
+Everything you are likely to change from week to week is in one short file at
+the top of the repo: [`site-settings.ts`](site-settings.ts).
+
+| Setting | What it changes |
+| --- | --- |
+| `notice` | A one-line message across the top of every page. `show: true` turns it on |
+| `contact` | Both phone numbers, the WhatsApp number and the email, everywhere they appear |
+| `google` | Your Google Business Profile link and (optional) direct review link, used by the "Write a review on Google" button under the testimonials |
+| `prices` | Hourly, 3-hour, full-day, outstation (per day) and night rates |
+| `outstation` | How trip estimates work: hours a day, extra hour, the driver's return day, km a day, the minimum profit for the `/admin` quote calculator ([docs/outstation-pricing.md](docs/outstation-pricing.md)) |
+| `monthly` | The Basic and Premium plans: prices, joining fee %, hours, extra-hour rate, days off, stand-in rate, replacement time |
+
+Change a number there and every page follows — English and Hindi pages, the
+booking form, the FAQ answers, the monthly plan table, the structured data and
+`/llms.txt`. No other file needs touching.
+
+**From a browser (no laptop needed):** open `site-settings.ts` on github.com →
+pencil icon → change the value → **Commit changes**. The site redeploys in about
+three minutes. Prices are plain numbers (`16000`, not `₹16,000`); words stay in
+quotes. If you edit on GitHub, run `git pull` on your laptop before working there.
+
+**A typo can't break the live site.** The deploy stops before publishing and the
+Actions tab shows why, in plain words — for example `contact.phone must be a
+10-digit mobile number` or `prices.fullDay: "from" (1300) is bigger than "to"
+(1200)`. Fix the line and commit again.
+
+**Never put driver costs in `site-settings.ts`** — this repository is public.
+To have the deploy stop if a price ever falls below your minimum profit, add
+the costs as a GitHub secret instead: Settings → Secrets and variables →
+Actions → New secret `DRIVER_COSTS`, value like `outstation=1000-1100; fullDay=700`
+(your real figures). Error messages name the price, never the cost.
+
+To keep that one-file promise true, `npm run lint` (which the deploy runs) fails
+if a ₹ figure or a phone number is typed anywhere in `app/`, `components/` or
+`lib/`. In code, use `priceText` from [`lib/settings.ts`](lib/settings.ts) and
+`site.phone` from [`lib/site.ts`](lib/site.ts).
+
+## Running it
+
+```bash
+npm install
+npm run dev
+```
+
+Then <http://localhost:3000>.
+
+| Script | What it does |
+| --- | --- |
+| `npm run dev` | Dev server with hot reload |
+| `npm run build` | Type-checks, builds, and writes the static site to `out/` |
+| `npm run lint` | Type-check, plus the check that no price or phone number is typed outside `site-settings.ts` — no build |
+| `npm run og` | Regenerates `public/og.png` (the social preview card) |
+| `npm run inbox` | Opens a live screen of your bookings and driver applications — see below |
+| `npm run leads` | Downloads every booking and driver application to an Excel file — see below |
+| `npm test` | Runs the script tests |
+
+## Seeing your leads
+
+Two ways in, sharing one service-account key. Both read Firestore from **your own
+machine**: `firestore.rules` denies every read from the browser on purpose, so a
+leaked web API key can never be used to dump your customers' names, mobile
+numbers and addresses. Neither of these changes that, and neither adds a login
+page to the public site for anyone to attack.
+
+### `npm run inbox` — the live screen
+
+```bash
+npm run inbox
+```
+
+Opens a page in your browser listing every booking and every driver application,
+newest first, with a **NEW** badge on anything you have not looked at yet and an
+unread count on each tab. It refreshes itself every 15 seconds, so a booking made
+while the page is open appears on its own — with a beep and a desktop
+notification. Each row expands to the full details, with **Call** and **WhatsApp**
+buttons that open with a message already written.
+
+It also keeps `exports/drivebuddy-leads-latest.xlsx` current in the background, so
+the spreadsheet is always up to date without running anything else.
+
+How it is locked down, since it is holding customer PII:
+
+- Listens on `127.0.0.1` only. Nothing on your wifi or the internet can reach it.
+- Every request must carry a random key generated fresh at startup; the link stops
+  working when you stop the server.
+- The `Host` header is checked against an allow-list, which blocks DNS rebinding —
+  the attack where a website you visit makes *your* browser read localhost on its
+  behalf. Cross-site requests are refused and no CORS headers are ever sent.
+- Customer text is inserted as text, never as HTML, so a name or note containing
+  markup cannot execute.
+- It never writes to Firestore. Read-only by construction.
+
+**WhatsApp alerts (optional).** By default the alert is the browser's own desktop
+notification, which needs the page open. To get a WhatsApp message instead, create
+`~/.drivebuddy/notify.json` (Windows: `C:\Users\<you>\.drivebuddy\notify.json`):
+
+```json
+{
+  "channel": "callmebot",
+  "phone": "+919111473929",
+  "apikey": "your-callmebot-key",
+  "includeDetails": false
+}
+```
+
+Get the API key by messaging `+34 644 51 95 23` on WhatsApp with
+`I allow callmebot to send me messages`. It is free and needs no Firebase plan
+change. `includeDetails` is `false` on purpose: the alert travels through someone
+else's server, so it says *what* arrived and from which city, not the customer's
+name and number. Set it to `true` only if you accept that.
+
+For a first-party alternative, `"channel": "cloudapi"` with `phoneNumberId`,
+`accessToken` and `to` uses the official WhatsApp Cloud API, and
+`"channel": "webhook"` with a `url` POSTs JSON anywhere you like.
+
+### `npm run leads` — the spreadsheet
+
+```bash
+npm run leads
+```
+
+Writes `exports/drivebuddy-leads_<date>.xlsx` with three sheets — **Summary**
+(totals by city, service and day), **Bookings** and **Driver applications** —
+newest first, with the received date *and* time in IST. Use this when you want to
+sort, filter, count or keep a record.
+
+### One-time setup (both scripts)
+
+They need a service-account key:
+
+1. [Firebase console](https://console.firebase.google.com/) → gear icon → **Project settings** → **Service accounts**
+2. **Generate new private key** → **Generate key**. A `.json` file downloads.
+3. Rename it to `serviceAccount.json` and put it in `~/.drivebuddy/`
+   (Windows: `C:\Users\<you>\.drivebuddy\`) — **not** in this project folder.
+
+That file **is** a real secret — unlike the `NEXT_PUBLIC_FIREBASE_*` values, it
+grants full read/write access to the whole project. Never commit it, email it, or
+paste it into a chat.
+
+It lives outside the repo for a specific reason: **this repository is public, and
+`.gitignore` does not protect against a file uploaded through the github.com web
+UI.** Google scans public repositories and disables any service-account key it
+finds, usually within minutes, so a published key stops working anyway — the
+symptom is `invalid_grant: Invalid JWT Signature` on a key that is only minutes
+old. Keeping the key in your home folder makes that mistake impossible. The
+`exports/` folder is git-ignored too, because those spreadsheets contain real
+customer PII.
+
+## Deploying from GitHub (free, on your own domain)
+
+Already set up: this repo pushes to
+[github.com/Nihal51/very_new](https://github.com/Nihal51/very_new) and publishes
+to <https://thedrivebuddy.in> via
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on every commit to
+`main`. To redeploy:
+
+```bash
+git push
+```
+
+Watch it in the repo's **Actions** tab. It type-checks, builds, runs the SEO
+audit, and only publishes if all three pass — so a broken commit cannot take the
+site down. There are no repository variables or secrets to set: the Firebase
+config is committed in [`.env.production`](.env.production) and the domain in
+[`CNAME`](CNAME).
+
+### Setting this up on a fresh repo
+
+**1. Push the code.**
+
+```bash
+git init && git add -A && git commit -m "DriveBuddy production site" && git branch -M main
+```
+
+```bash
+git remote add origin https://github.com/YOUR-USERNAME/YOUR-REPO.git && git push -u origin main
+```
+
+**2. Turn on Pages.** Repo → **Settings → Pages → Build and deployment →
+Source: GitHub Actions**. Then set **Custom domain** to the domain in
+[`CNAME`](CNAME) and tick **Enforce HTTPS** once the certificate is issued (that
+can take up to an hour).
+
+**3. Point your DNS at GitHub.** At your registrar, for the apex domain create
+four `A` records — all with host `@`:
+
+```
+185.199.108.153
+185.199.109.153
+185.199.110.153
+185.199.111.153
+```
+
+and for `www`, one `CNAME` record pointing at `YOUR-USERNAME.github.io`.
+
+DNS takes anywhere from minutes to a few hours. Delete the `CNAME` file and the
+workflow publishes to `https://YOUR-USERNAME.github.io/YOUR-REPO/` instead —
+also fully working, with the sub-path handled automatically.
+
+### Other hosts
+
+`npm run build` produces `out/` — a folder of static HTML, CSS, JS and images.
+Upload it anywhere, or point a host at the repo:
+
+- **Vercel** — import the repo, no configuration needed. Add the seven env vars.
+- **Netlify** — build command `npm run build`, publish directory `out`.
+- **Cloudflare Pages** — build command `npm run build`, output directory `out`.
+- **Firebase Hosting** — add a `hosting` block to `firebase.json` with
+  `"public": "out"`, then `firebase deploy --only hosting`.
+- **Any shared host / cPanel** — drag the contents of `out/` into `public_html`.
+
+`trailingSlash: true` is set, so every route is a real `index.html` inside a
+directory. That means no host-specific rewrite rules are needed and clean URLs
+work on plain Apache/nginx.
+
+---
+
+## How it is put together
+
+```
+app/                    routes — one folder per page, App Router
+  layout.tsx            fonts, metadata defaults, header/footer, site-wide JSON-LD
+  page.tsx              home
+  cities/[city]/        the four SEO city pages, generated from lib/content.ts
+  hi/                   Hindi home page and Hindi city pages (copy in lib/content-hi.ts)
+  about/                who runs DriveBuddy — founder, facts, services
+  llms.txt/             → /llms.txt, generated from lib/content.ts
+  sitemap.ts            → /sitemap.xml
+  robots.ts             → /robots.txt
+  globals.css           the entire design system (Tailwind v4 @theme tokens)
+components/
+  ui/                   Button, Card, Badge, Alert, Field, Accordion, …
+  sections/             composed page sections (hero, pricing, testimonials, …)
+  icons.tsx             28 hand-drawn SVG icons — no emoji, no icon font
+  BookingForm.tsx       the main lead path
+  DriverForm.tsx        driver recruitment
+site-settings.ts        prices, phone numbers, notice bar  ← the file you edit
+lib/
+  settings.ts           checks site-settings.ts, formats every price (priceText)
+  outstation.ts         trip distances, days, the estimate and the /admin quote
+  trip.ts               the trip as the booking form, account page and /admin show it
+  site.ts               company details + the domain
+  content.ts            every word of marketing copy, typed
+  schema.ts             JSON-LD builders
+  seo.ts                per-page metadata builder
+  firebase.ts           lazy-loaded Firestore write, never throws
+  validate.ts           form validation rules
+scripts/og.mjs          generates public/og.png with sharp
+firestore.rules         ⚠️ deploy this
+```
+
+### Editing content
+
+Almost all copy lives in [`lib/content.ts`](lib/content.ts) — services, FAQs,
+testimonials, city areas and landmarks, driver perks (prices come from
+`site-settings.ts`; see above). Change it there and
+every page that uses it updates, including the JSON-LD and the city pages.
+Adding a fifth city means adding one object to the `cities` array: the page, the
+sitemap entry, the nav listing and the structured data all follow.
+
+Prices, phone numbers and email live in [`site-settings.ts`](site-settings.ts); the
+domain lives in [`CNAME`](CNAME).
+
+### Claims the build will not let you make
+
+`npm run check` fails if any page's rendered text asserts something the business
+cannot prove. The patterns live in the `UNSUBSTANTIATED` array in
+[`scripts/audit.mjs`](scripts/audit.mjs) and cover review counts, star ratings,
+customer or trip totals, satisfaction percentages, and "#1"/"top-rated"/"most
+trusted" style rankings. `aggregateRating` and `Review` markup are blocked
+separately, anywhere in the HTML.
+
+This exists because the site shipped with three invented figures — "4.9 from 187
+reviews", "4.9★" and "500+ families served" — and deleting the strings only fixed
+that day. Under the Consumer Protection Act 2019 an invented statistic is a
+misleading advertisement, and Google's review policy (updated 24 July 2026) treats
+fabricated review signals as grounds for a manual action, which makes it ignore
+*all* structured data on the page.
+
+The guard reads each page's text with tags, scripts and React's comment markers
+stripped — not the raw HTML. React renders `from <!-- -->187<!-- --> reviews`, and
+a stats block puts "500+" and "Families served" in sibling elements, so a
+raw-HTML check silently passes and the guard becomes decoration.
+
+When you genuinely have reviews and want to show the number: take it from the
+Business Profile, keep it current, attribute it on the page, delete just that one
+pattern, and say in the commit message where the figure came from. Do not re-add
+`aggregateRating` — [`lib/schema.ts`](lib/schema.ts) explains why it earns nothing
+and risks everything.
+
+### Design system
+
+`app/globals.css` holds every colour, type scale, radius and shadow as a
+Tailwind v4 `@theme` token. There is no `tailwind.config.js`.
+
+Contrast is designed in rather than hoped for. Amber `#f59e0b` sits at about
+2.1:1 on white, so **it never carries white text**: filled amber buttons use
+near-black text (11.4:1) and amber-as-text becomes `--color-accent-text`
+(`#b45309`, 4.6:1). The previous site had white on gold at 2.9:1, which failed
+WCAG AA. If you add a component, use the tokens and that stays true.
+
+### Performance notes
+
+Deliberate choices worth keeping if you edit this:
+
+- **Fonts are self-hosted** through `next/font`. No request to
+  `fonts.googleapis.com`, so no blocking third-party round trip and no layout
+  shift when the font swaps in.
+- **The Firebase SDK (~100 KB) is `import()`ed inside the submit handler.**
+  Someone reading the pricing page never downloads it.
+- **The mobile menu is a native `<dialog>`** — the browser supplies the focus
+  trap, Escape handling and background inertness, so there is no JS for it.
+- **The FAQ accordion is native `<details>`/`<summary>`** — zero JavaScript.
+- **Scroll reveals are CSS `animation-timeline: view()`** behind `@supports`,
+  and switch off under `prefers-reduced-motion`. No IntersectionObserver.
+
+### Accessibility
+
+Single `<h1>` per page, one visible focus style site-wide (2px amber ring),
+44px minimum tap targets, skip link, `aria-current` on the active nav item,
+form errors in `role="alert"` and tied to their input with `aria-describedby`,
+and focus moved to the confirmation panel after a successful submit.
+
+---
+
+## Getting found on Google and ChatGPT
+
+The site does its part: every page is crawlable static HTML with its own title,
+description, canonical, and structured data; there are English *and* Hindi
+pages for the home page and each city (`/hi/`), an About page that names the
+founder, and an FAQ written so each answer can be quoted on its own. `robots.txt`
+lets every crawler in — including Bingbot and `OAI-SearchBot`, the crawler
+ChatGPT search uses — and `/llms.txt` lists the facts in plain text.
+
+What decides the ranking from here is mostly off the site:
+
+1. **Google Business Profile** — the map results ("driver near me") come from
+   it, not from the website. Setup pack: [`docs/google-business-profile.md`](docs/google-business-profile.md).
+2. **Real Google reviews**, steadily. `npm run inbox` has an *Ask for review*
+   button for exactly this.
+3. **Bing Webmaster Tools** — <https://www.bing.com/webmasters> → *Import from
+   Google Search Console* (no code needed), then submit `sitemap.xml`. ChatGPT
+   search, Copilot and DuckDuckGo all lean on Bing's index; a site Bing does not
+   know is a site ChatGPT rarely cites. Run `npm run indexnow` after each deploy.
+   Also claim **Bing Places for Business** with the same name, phone and city.
+4. **Listings elsewhere, identical everywhere** — Justdial, Sulekha, IndiaMART,
+   a Facebook page, Apple Business Connect. Same name ("DriveBuddy"), same phone
+   (91114 73929), same website. AI assistants answering "best driver service in
+   Raipur" draw on exactly these pages. Add each profile URL to
+   `socialProfiles` in [`lib/site.ts`](lib/site.ts) so the structured data links them.
+5. **Mentions** — a local news story, a college or hospital listing, a wedding
+   planner's vendor page. One real link from a Raipur site outweighs a hundred
+   directory links.
+
+## Things left for you
+
+- **Deploy `firestore.rules`** (see above). This one matters — and it must be
+  redeployed after any change to the booking packages.
+- **Do the off-site steps** in *Getting found on Google and ChatGPT* above.
+- **Have `/privacy` and `/terms` reviewed by a lawyer.** Both pages carry a
+  visible notice saying so. They describe accurately what the site does, but
+  the liability, insurance and DPDP Act wording needs a professional eye.
+- **Get real reviews on the Google Business Profile.** This replaced the old
+  "verify the rating" item, which is now settled: the hero's "4.9 from 187
+  reviews", the stats strip's "4.9★" and "500+ families served" were all
+  invented, the owner confirmed as much on 2 Sep 2026, and all three are gone
+  along with the `rating` field in [`lib/site.ts`](lib/site.ts). The only honest
+  source of stars is the profile — see
+  [`docs/google-business-profile.md`](docs/google-business-profile.md).
+- **Submit `sitemap.xml` to Google Search Console** once the domain is live, and
+  claim the Google Business Profile for each city. Step-by-step, with every field
+  written out ready to paste: [`docs/google-business-profile.md`](docs/google-business-profile.md).
+
+### Cleaning up the old site
+
+The previous single-file site and its scratch files are still in `C:\git`,
+untouched. Nothing here reads them. When you are happy with this build:
+
+```bash
+cd /c/git && rm -f "New Text Document.txt" "index (2).html" _original_backup.html _db_clean.html _part*.html _part*.css _b64_*.txt
+```
+
+Keep a copy somewhere first if you want the old design for reference.
+
+## Bookings system: alerts, admin panel, customer login
+
+Free to run (no card): an Apps Script robot inside a Google Sheet numbers each
+booking, keeps customer records and sends Telegram + email alerts within a minute;
+you manage everything at `/admin` (a filterable table with Excel download), and
+the same Sheet stays a live, colour-coded copy of every booking; customers can log
+in with Google at `/account`.
+Architecture, data model and the 20-minute setup are in
+[docs/bookings-system.md](docs/bookings-system.md).
+
+    npm run deploy:backend   # security rules (or paste firestore.rules in the Firebase console)
+    npm test                 # includes a simulated run of the alerts robot
+    npm run test:rules       # security rules against the emulator (needs Java)

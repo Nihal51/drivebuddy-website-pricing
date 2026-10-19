@@ -1,0 +1,131 @@
+# ============================================================================
+#  DriveBuddy — build and publish to GitHub Pages.
+#
+#  This is the only file you need. It builds the site and republishes it on
+#  every push to main. Firebase config is committed in .env.production (those
+#  values are public identifiers, not secrets — firestore.rules is what protects
+#  the data), and the domain is committed in the CNAME file, so there are NO
+#  variables to set.
+#
+#  SETUP:
+#    Repo → Settings → Pages → Source: "GitHub Actions".  That's it.
+#
+#  TO CHANGE THE DOMAIN:
+#    Edit the CNAME file in the repo root (one line, e.g. example.in — no
+#    https://, no trailing slash) and point that domain's DNS at GitHub; the
+#    records are in the README. Delete CNAME and the site falls back to
+#    https://<you>.github.io/<repo>/, which also works.
+# ============================================================================
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # Lets you re-run a deploy by hand from the Actions tab without a new commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A newer push supersedes an in-flight deploy, but never cancels one midway
+# through publishing — that would leave the site half-updated.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Work out where the site will live
+        run: |
+          # The domain lives in the committed CNAME file — the same file GitHub
+          # Pages itself reads for the custom-domain setting, so there is exactly
+          # one place to change it. The SITE_DOMAIN variable overrides it, which
+          # is only useful to a fork publishing on a different domain.
+          DOMAIN="${{ vars.SITE_DOMAIN }}"
+          if [ -z "$DOMAIN" ] && [ -f CNAME ]; then
+            DOMAIN=$(tr -d '[:space:]' < CNAME)
+          fi
+          echo "SITE_DOMAIN_RESOLVED=$DOMAIN" >> "$GITHUB_ENV"
+
+          if [ -n "$DOMAIN" ]; then
+            # Custom domain: the site sits at the root, so no path prefix.
+            echo "NEXT_PUBLIC_SITE_URL=https://$DOMAIN" >> "$GITHUB_ENV"
+            echo "NEXT_PUBLIC_BASE_PATH=" >> "$GITHUB_ENV"
+            echo "Publishing to https://$DOMAIN"
+          else
+            # No custom domain: GitHub Pages serves a project repo from a
+            # sub-path, e.g. https://user.github.io/repo/. Without the matching
+            # basePath every stylesheet and script would 404.
+            OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+            REPO="${GITHUB_REPOSITORY#*/}"
+            echo "NEXT_PUBLIC_SITE_URL=https://${OWNER}.github.io/${REPO}" >> "$GITHUB_ENV"
+            echo "NEXT_PUBLIC_BASE_PATH=/${REPO}" >> "$GITHUB_ENV"
+            echo "::notice::No CNAME file and no SITE_DOMAIN variable — publishing to https://${OWNER}.github.io/${REPO}/ instead."
+          fi
+
+      # Firebase config comes from the committed .env.production — nothing to set.
+      - name: Build static export
+        env:
+          # Optional profit guard: what drivers cost, e.g. "outstation=1000-1100; fullDay=700".
+          # Settings → Secrets and variables → Actions → New secret DRIVER_COSTS.
+          # A price below the minimum profit then stops the deploy. Never put
+          # costs in site-settings.ts — this repository is public.
+          DRIVER_COSTS: ${{ secrets.DRIVER_COSTS }}
+        run: npm run build
+
+      - name: Audit the export (SEO, headings, JSON-LD, sitemap)
+        run: node scripts/audit.mjs
+
+      - name: Prepare the artifact
+        run: |
+          # GitHub Pages would otherwise hand the output to Jekyll, which strips
+          # every directory beginning with an underscore — including _next/,
+          # i.e. all the CSS and JS.
+          touch out/.nojekyll
+
+          # Ship the custom domain inside the artifact. Without this, a deploy
+          # can clear the custom domain configured in Settings.
+          if [ -n "$SITE_DOMAIN_RESOLVED" ]; then
+            echo "$SITE_DOMAIN_RESOLVED" > out/CNAME
+            echo "CNAME → $SITE_DOMAIN_RESOLVED"
+          else
+            echo "::warning::No custom domain — deploying to the default github.io URL."
+          fi
+
+      # Publishing happens only in the live website's repo. In a copy (like the
+      # pricing preview) the build, checks and audit still run, nothing is published.
+      - if: github.repository == 'Nihal51/very_new'
+        uses: actions/configure-pages@v5
+      - if: github.repository == 'Nihal51/very_new'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    if: github.repository == 'Nihal51/very_new'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
